@@ -1,8 +1,11 @@
 require('dotenv').config();
 const { VK } = require('vk-io');
 const mysql = require('mysql2/promise');
+const axios = require('axios');
 
 const TOKEN = 'process.env.VK_TOKEN';
+
+const PYTHON_SERVER_URL = 'http://localhost:5001/extract';
 
 const pool = mysql.createPool({
     host: process.env.DB_HOST,
@@ -33,6 +36,12 @@ async function getOrCreateUser(vkId, name) {
         );
         
         if (rows.length > 0) {
+            if (name && rows[0].name !== name) {
+                await pool.query(
+                    'UPDATE users SET name = ? WHERE vk_id = ?',
+                    [name, vkId.toString()]
+                );
+            }
             return rows[0];
         }
         
@@ -79,101 +88,25 @@ async function createOrder(userId, orderData) {
     }
 }
 
-function extractPhone(text) {
-    const match = text.match(/\b(\d{10,11})\b/);
-    if (match) {
-        const phone = match[1];
-        if (phone.length === 11 && !phone.startsWith('8') && !phone.startsWith('7')) {
+async function extractEntitiesWithBERT(text) {
+    try {
+        const response = await axios.post(PYTHON_SERVER_URL, { text }, {
+            timeout: 10000
+        });
+        
+        if (response.data.error) {
+            console.error('Ошибка от Python сервера:', response.data.error);
             return null;
         }
-        return phone;
-    }
-    return null;
-}
-
-function extractName(text) {
-    const patterns = [
-        /имя\s+([А-ЯЁ][а-яё]+)/i,
-        /\bя\b\s+([А-ЯЁ][а-яё]+)/i,
-        /меня зовут\s+([А-ЯЁ][а-яё]+)/i,
-        /зовут\s+([А-ЯЁ][а-яё]+)/i
-    ];
-    for (const pattern of patterns) {
-        const match = text.match(pattern);
-        if (match) return match[1].trim();
-    }
-    return null;
-}
-
-function extractPizzaType(text) {
-    const types = [
-        { base: 'маргарит', result: 'Маргарита' },
-        { base: 'пепперони', result: 'Пепперони' },
-        { base: 'гавайск', result: 'Гавайская' },
-        { base: 'четыре сыра', result: 'Четыре сыра' },
-        { base: 'диабло', result: 'Диабло' },
-        { base: 'мексиканск', result: 'Мексиканская' },
-        { base: 'вегетарианск', result: 'Вегетарианская' },
-        { base: 'сырн', result: 'Сырная' }
-    ];
-    
-    const lowerText = text.toLowerCase();
-    for (const type of types) {
-        if (lowerText.includes(type.base)) {
-            return type.result;
+        
+        return response.data;
+    } catch (error) {
+        console.error('Ошибка при запросе к Python серверу:', error.message);
+        if (error.code === 'ECONNREFUSED') {
+            console.error('Python сервер не запущен');
         }
+        return null;
     }
-    return null;
-}
-
-function extractTime(text) {
-    const patterns = [
-        /время\s+(\d{1,2})[:.](\d{2})/i,
-        /в\s+(\d{1,2})[:.](\d{2})/i,
-        /к\s+(\d{1,2})[:.](\d{2})/i,
-        /на\s+(\d{1,2})[:.](\d{2})/i
-    ];
-    for (const pattern of patterns) {
-        const match = text.match(pattern);
-        if (match) {
-            const hours = parseInt(match[1]);
-            const minutes = parseInt(match[2]);
-            if (hours >= 0 && hours <= 23 && minutes >= 0 && minutes <= 59) {
-                return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
-            }
-        }
-    }
-    return null;
-}
-
-function extractAddress(text) {
-    const patterns = [
-        /адрес\s*:\s*(.+)/i,
-        /адрес\s+(.+)/i,
-        /по адресу\s*:\s*(.+)/i,
-        /по адресу\s+(.+)/i,
-        /доставка\s*:\s*(.+)/i,
-        /доставка\s+(.+)/i
-    ];
-    
-    for (const pattern of patterns) {
-        const match = text.match(pattern);
-        if (match) {
-            let address = match[1].trim();
-            address = address.replace(/\d{1,2}[:.]\d{2}/g, '');
-            address = address.replace(/\bвремя\b\s*/gi, '');
-            address = address.replace(/\bв\b\s*/gi, '');
-            address = address.replace(/\bк\b\s*/gi, '');
-            address = address.replace(/\bна\b\s*/gi, '');
-            address = address.replace(/время\s*/gi, '');
-            address = address.replace(/в\s*/gi, '');
-            address = address.replace(/к\s*/gi, '');
-            address = address.replace(/на\s*/gi, '');
-            address = address.replace(/^[,.\s]+/, '').replace(/[,.\s]+$/, '');
-            return address || null;
-        }
-    }
-    return null;
 }
 
 const vk = new VK({
@@ -185,6 +118,13 @@ vk.updates.start()
         console.log('Бот запущен и готов к работе!');
         console.log('Отправьте сообщение в группу, чтобы проверить');
         await checkDB();
+        
+        try {
+            await axios.get('http://localhost:5001/health', { timeout: 2000 });
+            console.log('Python сервер доступен');
+        } catch (error) {
+            console.warn('Python сервер не доступен');
+        }
     })
     .catch((error) => {
         console.error('Ошибка запуска:', error);
@@ -213,26 +153,33 @@ vk.updates.on('message_new', async (context) => {
             await context.send('Привет! Я бот для заказа пиццы!\n\n' +
                 'Напишите одним сообщением:\n' +
                 '- Какую пиццу хотите\n' +
-                '- Ваше имя (используйте маркер "имя")\n' +
+                '- Ваше имя\n' +
                 '- Телефон (10 или 11 цифр подряд)\n' +
-                '- Адрес доставки (используйте маркер "адрес")\n' +
+                '- Адрес доставки\n' +
                 '- Желаемое время доставки (необязательно)\n\n' +
                 'Пример: "Хочу пепперони, зовут Михаил, 89991234567, адрес: ул. Ленина, 15, 19:30"');
             return;
         }
 
-        const phone = extractPhone(text);
-        const name = extractName(text);
-        const pizzaType = extractPizzaType(text);
-        const deliveryTime = extractTime(text);
-        const address = extractAddress(text);
+        const extracted = await extractEntitiesWithBERT(text);
+        
+        if (!extracted) {
+            await context.send('Сервер анализа временно недоступен. Попробуйте позже.');
+            return;
+        }
+        
+        const phone = extracted.phone;
+        const name = extracted.name;
+        const pizzaType = extracted.pizza_type;
+        const deliveryTime = extracted.delivery_time;
+        const address = extracted.address;
         
         console.log('Извлеченные данные:', { phone, name, pizzaType, address, deliveryTime });
 
         const missingFields = [];
-        if (!name) missingFields.push('имя (используйте маркер "имя")');
+        if (!name) missingFields.push('имя');
         if (!phone) missingFields.push('телефон (10 или 11 цифр)');
-        if (!address) missingFields.push('адрес (используйте маркер "адрес")');
+        if (!address) missingFields.push('адрес');
         if (!pizzaType) missingFields.push('тип пиццы');
         
         if (missingFields.length > 0) {
