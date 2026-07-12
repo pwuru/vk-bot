@@ -36,11 +36,26 @@ def extract_phone(text):
     return None
 
 def extract_pizza(text):
-    types = ['маргарита', 'пепперони', 'гавайская', 'четыре сыра', 'диабло', 'мексиканская', 'вегетарианская', 'сырная']
+    types = ['маргарит', 'пепперони', 'гавайск', 'четыре сыра', 'диабло', 'мексиканск', 'вегетарианск', 'сырн']
     lower_text = text.lower()
     for pizza in types:
         if pizza in lower_text:
-            return pizza.title()
+            if pizza == 'маргарит':
+                return 'Маргарита'
+            if pizza == 'пепперони':
+                return 'Пепперони'
+            if pizza == 'гавайск':
+                return 'Гавайская'
+            if pizza == 'четыре сыра':
+                return 'Четыре сыра'
+            if pizza == 'диабло':
+                return 'Диабло'
+            if pizza == 'мексиканск':
+                return 'Мексиканская'
+            if pizza == 'вегетарианск':
+                return 'Вегетарианская'
+            if pizza == 'сырн':
+                return 'Сырная'
     return None
 
 def extract_time(text):
@@ -48,7 +63,8 @@ def extract_time(text):
         r'время\s+(\d{1,2})[:.](\d{2})',
         r'в\s+(\d{1,2})[:.](\d{2})',
         r'к\s+(\d{1,2})[:.](\d{2})',
-        r'на\s+(\d{1,2})[:.](\d{2})'
+        r'на\s+(\d{1,2})[:.](\d{2})',
+        r'\b(\d{1,2})[:.](\d{2})\b'
     ]
     for pattern in patterns:
         match = re.search(pattern, text, re.IGNORECASE)
@@ -60,28 +76,43 @@ def extract_time(text):
     return None
 
 def extract_address(text, name, pizza, phone, time):
-    clean_text = text
-    if name:
-        clean_text = clean_text.replace(name, '')
-    if pizza:
-        clean_text = clean_text.replace(pizza, '')
-    if phone:
-        clean_text = clean_text.replace(phone, '')
-    if time:
-        clean_text = clean_text.replace(time, '')
+    match = re.search(r'по адресу\s+(.+)', text, re.IGNORECASE)
+    if match:
+        address = match.group(1).strip()
+        if name:
+            address = address.replace(name, '')
+        if pizza:
+            address = address.replace(pizza, '')
+        if phone:
+            address = address.replace(phone, '')
+        if time:
+            address = address.replace(time, '')
+        address = re.sub(r'\s+', ' ', address).strip()
+        address = re.sub(r'^[,.\s:]+', '', address)
+        address = re.sub(r'[,.\s:]+$', '', address)
+        address = re.sub(r',+', ',', address)
+        address = re.sub(r'^,\s*', '', address)
+        return address if address else None
     
-    markers = ['хочу', 'заказать', 'пиццу', 'пицца', 'заказ', 'имя', 'зовут', 'меня зовут', 'я',
-               'время', 'в', 'к', 'на', 'по адресу', 'адрес', 'доставка']
-    for marker in markers:
-        clean_text = re.sub(r'\b' + marker + r'\b', '', clean_text, flags=re.IGNORECASE)
+    match = re.search(r'адрес\s*(?::|\s+)(.+)', text, re.IGNORECASE)
+    if match:
+        address = match.group(1).strip()
+        if name:
+            address = address.replace(name, '')
+        if pizza:
+            address = address.replace(pizza, '')
+        if phone:
+            address = address.replace(phone, '')
+        if time:
+            address = address.replace(time, '')
+        address = re.sub(r'\s+', ' ', address).strip()
+        address = re.sub(r'^[,.\s:]+', '', address)
+        address = re.sub(r'[,.\s:]+$', '', address)
+        address = re.sub(r',+', ',', address)
+        address = re.sub(r'^,\s*', '', address)
+        return address if address else None
     
-    clean_text = re.sub(r'\s+', ' ', clean_text).strip()
-    clean_text = re.sub(r'^[,.\s]+', '', clean_text)
-    clean_text = re.sub(r'[,.\s]+$', '', clean_text)
-    clean_text = re.sub(r',+', ',', clean_text)
-    clean_text = re.sub(r'^,\s*', '', clean_text)
-    
-    return clean_text if clean_text else None
+    return None
 
 def extract_name_with_bert(text, ner_results):
     patterns = [
@@ -96,29 +127,29 @@ def extract_name_with_bert(text, ner_results):
             name = match.group(1)
             address_words = ['улица', 'ул', 'проспект', 'пр', 'переулок', 'пер', 'площадь', 'пл', 
                            'бульвар', 'б-р', 'шоссе', 'набережная', 'наб', 'дом', 'д', 'квартира', 
-                           'кв', 'корпус', 'корп', 'строение', 'стр', 'зеленая', 'зеленый']
+                           'кв', 'корпус', 'корп', 'строение', 'стр']
             if not any(word in name.lower() for word in address_words):
                 return name
 
     for entity in ner_results:
-        if entity['entity_group'] in ['PER', 'PERSON']:
+        if entity['entity_group'] in ['PER', 'PERSON', 'FIRST_NAME']:
             return entity['word']
     return None
 
 def extract_address_with_bert(text, ner_results, name, pizza, phone, time):
     address_parts = []
     for entity in ner_results:
-        if entity['entity_group'] in ['LOC', 'ORG', 'ADDRESS']:
-            address_parts.append(entity['word'])
+        if entity['entity_group'] in ['LOC', 'STREET', 'HOUSE', 'CITY']:
+            word = entity['word']
+            word = word.strip(',.:;!?')
+            if word and len(word) > 1 and not word.isdigit():
+                address_parts.append(word)
     
-    if address_parts:
+    if len(address_parts) >= 2:
         address = ' '.join(address_parts)
-        house_match = re.search(r'дом\s*(\d+[А-Яа-я]?)', text, re.IGNORECASE)
-        if house_match:
-            address += f" {house_match.group(0)}"
         return address
-
-    return extract_address(text, name, pizza, phone, time)
+    
+    return None
 
 @app.route('/extract', methods=['POST'])
 def extract():
@@ -141,6 +172,21 @@ def extract():
         name = extract_name_with_bert(text, ner_results)
 
         address = extract_address_with_bert(text, ner_results, name, pizza, phone, time)
+        
+        if not address:
+            address = extract_address(text, name, pizza, phone, time)
+        
+        if address:
+            address = re.sub(r'пепперони|маргарит|гавайск|четыре сыра|диабло|мексиканск|вегетарианск|сырн', '', address, flags=re.IGNORECASE)
+            address = re.sub(r'\b\d{10,11}\b', '', address)
+            address = re.sub(r'\b\d{1,2}[:.]\d{2}\b', '', address)
+            address = re.sub(r'\s+', ' ', address).strip()
+            address = re.sub(r'^[,.\s:]+', '', address)
+            address = re.sub(r'[,.\s:]+$', '', address)
+            address = re.sub(r',+', ',', address)
+            address = re.sub(r'^,\s*', '', address)
+            if address == '':
+                address = None
 
         serializable_results = convert_to_serializable(ner_results)
 
