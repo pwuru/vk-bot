@@ -28,6 +28,56 @@ async function checkDB() {
     }
 }
 
+async function getDialogState(userId) {
+    try {
+        const [rows] = await pool.query(
+            'SELECT state, collected_data FROM dialog_states WHERE user_id = ?',
+            [userId]
+        );
+        if (rows.length > 0) {
+            return {
+                state: rows[0].state,
+                collectedData: rows[0].collected_data ? JSON.parse(rows[0].collected_data) : {}
+            };
+        }
+        return { state: 'new', collectedData: {} };
+    } catch (error) {
+        console.error('Ошибка в getDialogState:', error);
+        return { state: 'new', collectedData: {} };
+    }
+}
+
+async function saveDialogState(userId, state, collectedData) {
+    try {
+        await pool.query(
+            `INSERT INTO dialog_states (user_id, state, collected_data) 
+             VALUES (?, ?, ?) 
+             ON DUPLICATE KEY UPDATE 
+             state = VALUES(state), 
+             collected_data = VALUES(collected_data),
+             last_message = CURRENT_TIMESTAMP`,
+            [userId, state, JSON.stringify(collectedData)]
+        );
+        return true;
+    } catch (error) {
+        console.error('Ошибка в saveDialogState:', error);
+        return false;
+    }
+}
+
+async function clearDialogState(userId) {
+    try {
+        await pool.query(
+            'DELETE FROM dialog_states WHERE user_id = ?',
+            [userId]
+        );
+        return true;
+    } catch (error) {
+        console.error('Ошибка в clearDialogState:', error);
+        return false;
+    }
+}
+
 async function getOrCreateUser(vkId, name) {
     try {
         const [rows] = await pool.query(
@@ -161,27 +211,50 @@ vk.updates.on('message_new', async (context) => {
             return;
         }
 
+        const user = await getOrCreateUser(userId, firstName);
+        if (!user) {
+            await context.send('Ошибка базы данных. Попробуйте позже.');
+            return;
+        }
+
+        const dialogState = await getDialogState(user.id);
+        let collectedData = dialogState.collectedData || {};
+
         const extracted = await extractEntitiesWithBERT(text);
         
         if (!extracted) {
             await context.send('Сервер анализа временно недоступен. Попробуйте позже.');
             return;
         }
-        
-        const phone = extracted.phone;
-        const name = extracted.name;
-        const pizzaType = extracted.pizza_type;
-        const deliveryTime = extracted.delivery_time;
-        const address = extracted.address;
-        
-        console.log('Извлеченные данные:', { phone, name, pizzaType, address, deliveryTime });
+
+        if (!extracted.address) {
+            const fallbackMatch = text.match(/адрес\s*(?::|\s+)(.+)/i) || text.match(/по адресу\s+(.+)/i);
+            if (fallbackMatch) {
+                extracted.address = fallbackMatch[1].trim();
+                console.log('Адрес найден через fallback:', extracted.address);
+            }
+        }
+
+        if (extracted.name) collectedData.name = extracted.name;
+        if (extracted.phone) collectedData.phone = extracted.phone;
+        if (extracted.address) collectedData.address = extracted.address;
+        if (extracted.pizza_type) collectedData.pizza_type = extracted.pizza_type;
+        if (extracted.delivery_time) collectedData.delivery_time = extracted.delivery_time;
+
+        const phone = collectedData.phone || null;
+        const name = collectedData.name || null;
+        const pizzaType = collectedData.pizza_type || null;
+        const deliveryTime = collectedData.delivery_time || null;
+        const address = collectedData.address || null;
+
+        console.log('Собранные данные:', { phone, name, pizzaType, address, deliveryTime });
 
         const missingFields = [];
         if (!name) missingFields.push('имя');
         if (!phone) missingFields.push('телефон (10 или 11 цифр)');
         if (!address) missingFields.push('адрес');
         if (!pizzaType) missingFields.push('тип пиццы');
-        
+
         if (missingFields.length > 0) {
             let response = 'Не хватает данных для заказа:\n';
             missingFields.forEach((field, index) => {
@@ -195,15 +268,12 @@ vk.updates.on('message_new', async (context) => {
             if (pizzaType) response += `\nПицца: ${pizzaType}`;
             if (deliveryTime) response += `\nВремя: ${deliveryTime}`;
             
+            await saveDialogState(user.id, 'collecting', collectedData);
             await context.send(response);
             return;
         }
 
-        const user = await getOrCreateUser(userId, firstName);
-        if (!user) {
-            await context.send('Ошибка базы данных. Попробуйте позже.');
-            return;
-        }
+        await clearDialogState(user.id);
         
         const orderId = await createOrder(user.id, {
             name: name,
