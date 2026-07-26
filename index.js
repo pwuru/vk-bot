@@ -5,7 +5,8 @@ const axios = require('axios');
 
 const TOKEN = 'process.env.VK_TOKEN';
 
-const PYTHON_SERVER_URL = 'http://localhost:5001/extract';
+const YANDEX_FOLDER_ID = process.env.YANDEX_FOLDER_ID;
+const YANDEX_API_KEY = process.env.YANDEX_API_KEY;
 
 const pool = mysql.createPool({
     host: process.env.DB_HOST,
@@ -138,22 +139,71 @@ async function createOrder(userId, orderData) {
     }
 }
 
-async function extractEntitiesWithBERT(text) {
+async function extractEntitiesWithYandex(text) {
     try {
-        const response = await axios.post(PYTHON_SERVER_URL, { text }, {
-            timeout: 10000
-        });
+        const prompt = `Ты — ассистент для извлечения данных из сообщений пользователя.
+
+Извлеки из текста следующие данные и верни их строго в формате JSON с полями:
+- name: имя человека (если указано)
+- phone: номер телефона (если указан)
+- address: адрес доставки (если указан)
+- pizza_type: тип пиццы (если указан)
+- delivery_time: время доставки (если указано)
+
+Если какое-то поле отсутствует в тексте, верни для него null.
+
+Важно: ВНИМАТЕЛЬНО анализируй текст. Пользователь может писать недостающие данные отдельными сообщениями. Например, в сообщении "адрес култукская 11" нужно извлечь address: "култукская 11".
+
+Текст: "${text}"`;
+
+        const response = await axios.post(
+            'https://llm.api.cloud.yandex.net/foundationModels/v1/completion',
+            {
+                modelUri: `gpt://${YANDEX_FOLDER_ID}/yandexgpt-lite/latest`,
+                completionOptions: {
+                    stream: false,
+                    temperature: 0.1,
+                    maxTokens: 300
+                },
+                messages: [
+                    {
+                        role: 'system',
+                        text: 'Ты извлекаешь данные из текста. Возвращай только чистый JSON без Markdown, без пояснений, без кавычек вокруг JSON. Используй только поля: name, phone, address, pizza_type, delivery_time. Всегда возвращай JSON, даже если данные неполные. Для отсутствующих полей используй null.'
+                    },
+                    {
+                        role: 'user',
+                        text: prompt
+                    }
+                ]
+            },
+            {
+                headers: {
+                    'Authorization': `Api-Key ${YANDEX_API_KEY}`,
+                    'x-folder-id': YANDEX_FOLDER_ID,
+                    'Content-Type': 'application/json'
+                },
+                timeout: 15000
+            }
+        );
+
+        let result = response.data.result.alternatives[0].message.text;
         
-        if (response.data.error) {
-            console.error('Ошибка от Python сервера:', response.data.error);
-            return null;
+        console.log('Ответ Yandex:', result);
+        
+        result = result.replace(/```json\s*/gi, '');
+        result = result.replace(/```\s*/gi, '');
+        result = result.trim();
+        
+        const jsonMatch = result.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+            result = jsonMatch[0];
         }
         
-        return response.data;
+        return JSON.parse(result);
     } catch (error) {
-        console.error('Ошибка при запросе к Python серверу:', error.message);
-        if (error.code === 'ECONNREFUSED') {
-            console.error('Python сервер не запущен');
+        console.error('Ошибка при запросе к Yandex:', error.message);
+        if (error.response) {
+            console.error('Ответ Yandex с ошибкой:', JSON.stringify(error.response.data, null, 2));
         }
         return null;
     }
@@ -168,13 +218,6 @@ vk.updates.start()
         console.log('Бот запущен и готов к работе!');
         console.log('Отправьте сообщение в группу, чтобы проверить');
         await checkDB();
-        
-        try {
-            await axios.get('http://localhost:5001/health', { timeout: 2000 });
-            console.log('Python сервер доступен');
-        } catch (error) {
-            console.warn('Python сервер не доступен');
-        }
     })
     .catch((error) => {
         console.error('Ошибка запуска:', error);
@@ -220,19 +263,11 @@ vk.updates.on('message_new', async (context) => {
         const dialogState = await getDialogState(user.id);
         let collectedData = dialogState.collectedData || {};
 
-        const extracted = await extractEntitiesWithBERT(text);
+        const extracted = await extractEntitiesWithYandex(text);
         
         if (!extracted) {
             await context.send('Сервер анализа временно недоступен. Попробуйте позже.');
             return;
-        }
-
-        if (!extracted.address) {
-            const fallbackMatch = text.match(/адрес\s*(?::|\s+)(.+)/i) || text.match(/по адресу\s+(.+)/i);
-            if (fallbackMatch) {
-                extracted.address = fallbackMatch[1].trim();
-                console.log('Адрес найден через fallback:', extracted.address);
-            }
         }
 
         if (extracted.name) collectedData.name = extracted.name;
