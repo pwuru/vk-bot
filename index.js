@@ -3,7 +3,7 @@ const { VK } = require('vk-io');
 const mysql = require('mysql2/promise');
 const axios = require('axios');
 
-const TOKEN = 'process.env.VK_TOKEN';
+const TOKEN = process.env.VK_TOKEN;
 
 const YANDEX_FOLDER_ID = process.env.YANDEX_FOLDER_ID;
 const YANDEX_API_KEY = process.env.YANDEX_API_KEY;
